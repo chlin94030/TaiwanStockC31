@@ -1,0 +1,135 @@
+name: Alpha Radar 雲端資料與模型
+
+on:
+  push:
+    branches: [main, master]
+    paths: ["kosto/**", "config/**", "app.py", "cli.py", "alpharadar_core.zip", "requirements*.txt", ".github/workflows/pipeline.yml"]
+  schedule:
+    - cron: "10 15 * * 1-5" # 台北交易日23:10；排程可能延遲
+    - cron: "10 1 * * 6"   # 台北週六09:10，擴大候選
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [auto, full, data-only]
+        default: auto
+      action:
+        type: choice
+        options: [run, lock, unlock, rollback]
+        default: run
+      horizon:
+        type: choice
+        options: [mid, short, long]
+        default: mid
+      round:
+        type: choice
+        options: ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
+        default: "0"
+
+permissions: {}
+concurrency:
+  group: alpharadar-cloud
+  cancel-in-progress: false
+env:
+  PYTHONUNBUFFERED: "1"
+  MODE: ${{ inputs.mode || 'auto' }}
+  ACTION: ${{ inputs.action || 'run' }}
+  HORIZON: ${{ inputs.horizon || 'mid' }}
+  ROUND: ${{ inputs.round || '0' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-pipeline.txt pytest==9.2.0
+      - name: 軟體與發布契約回歸，通過後才更新資料
+        run: python cli.py cloud check
+  data:
+    needs: validate
+    if: ${{ (inputs.action || 'run') == 'run' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        group: [price, institutional, margin, valuation, misc]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-pipeline.txt
+      - run: pip install -r requirements-pipeline.txt
+      - name: 沿用檢查點，沒有才首次建立
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python cli.py cloud restore --group "${{ matrix.group }}"
+      - name: 只補未完成日期
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python cli.py cloud update --group "${{ matrix.group }}" --budget 80
+      - name: 下載失敗仍保存已完成進度
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python cli.py cloud checkpoint --group "${{ matrix.group }}"
+
+  research:
+    needs: [validate, data]
+    if: ${{ always() && !cancelled() && needs.validate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-pipeline.txt
+      - run: pip install -r requirements-pipeline.txt
+      - name: 取回雲端資料與上次模型狀態
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python cli.py cloud restore-all
+      - name: 驗證、模型切換與發布
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCHEDULE: ${{ github.event.schedule }}
+          AUTO_PROMOTE: ${{ vars.AUTO_PROMOTE || 'true' }}
+        run: |
+          args=()
+          if [ "$MODE" = full ] || [ "$SCHEDULE" = '10 1 * * 6' ]; then args+=(--full); fi
+          if [ "$MODE" = data-only ]; then args+=(--data-only); fi
+          python cli.py cloud finish --candidates 6 --action "$ACTION" --horizon "$HORIZON" "${args[@]}"
+      - name: 保留模型、試驗與公告後紀錄
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python cli.py cloud save-state
+      - name: 首次建置未齊且確有進度才續跑，最多8輪
+        if: ${{ steps.publish.outputs.continue == 'true' && env.MODE == 'auto' && env.ACTION == 'run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$ROUND" -lt 8 ]; then
+            gh workflow run pipeline.yml --ref "$GITHUB_REF_NAME" -f mode=auto -f round="$((ROUND + 1))"
+            echo "已排入下一輪；網站保留上次發布，不重建資料庫。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "續跑已達8輪；下次排程仍沿用檢查點。" >> "$GITHUB_STEP_SUMMARY"
+          fi

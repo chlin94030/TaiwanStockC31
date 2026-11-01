@@ -1,0 +1,17 @@
+ALPHA RADAR V31｜iPhone同層上傳
+
+解壓手機包後9個同層檔案：
+app.py、cli.py、alpharadar_core.zip、requirements.txt、requirements-pipeline.txt、
+START_HERE.txt、MOBILE_UPLOAD.txt、pipeline_workflow_COPY.txt、FLAT_MANIFEST.sha256。
+
+1.「檔案」App點外層ZIP，只解壓一次。
+2. GitHub自己的儲存庫 → Add file → Upload files → 全選9檔 → Commit。
+3. 另開Add file → Create new file，輸入.github/workflows/pipeline.yml，
+   貼上pipeline_workflow_COPY.txt全文。已有檔案則Edit全選替換。
+   GitHub只認這個固定路徑，同層TXT不能直接啟用排程。
+4. Actions → Alpha Radar 雲端資料與模型 → Run workflow，mode=auto。
+5. Streamlit入口app.py；偵測不到儲存庫時在Secrets設ALPHARADAR_REPO。
+
+不要解壓alpharadar_core.zip，不用上傳資料夾或下載歷史資料包。
+首次背景建置不保證一分鐘；完成後網頁讀已算好的結果。
+更新失敗保留前次成果。完整操作與限制見START_HERE.txt。
